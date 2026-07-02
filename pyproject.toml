@@ -1,0 +1,41 @@
+[project]
+name = "buchungatakan"
+version = "0.5.0"
+description = "Zentrales Rechnungs-, Kontoauszugs- und Zuordnungssystem"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]==0.138.1",
+    "sqlalchemy==2.0.51",
+    "asyncpg==0.31.0",
+    "alembic==1.18.5",
+    "pyjwt==2.13.0",
+    "pwdlib[argon2]==0.3.0",
+    "uvicorn==0.49.0",
+    "httpx==0.28.1",
+    "pdfplumber==0.11.10",
+    "openpyxl==3.1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest-asyncio==1.4.0",
+    "psycopg2-binary==2.9.12",
+]
+invoice_providers = [
+    "invoice2data==1.0.0",
+    "paddleocr>=2.7.0,<3.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

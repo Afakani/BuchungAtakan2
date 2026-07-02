@@ -1,0 +1,120 @@
+CODE REVIEW PHASE 5.1 - Befunde fuer Claude
+Scope: nur Phase 5.1 Bankimport-Core/Bankbuchungen. Phase 5.2+ ignoriert.
+
+1. HIGH - Tenant-Isolationstest ist wirkungslos
+Datei: tests/integration/test_bankbuchungen.py:228-241
+
+Problem:
+Der zentrale Test fuer Tenant-Isolation enthaelt eine Tautologie:
+
+assert 9876 not in betraege_a or True
+
+Durch "or True" kann der Test nie fehlschlagen. Damit ist nicht belastbar getestet, dass Tenant A keine Bankbuchungen von Tenant B sieht.
+
+Notwendige Korrektur:
+- "or True" entfernen.
+- Test so formulieren, dass fremde Buchungen wirklich ausgeschlossen werden.
+- Optional staerker: auch pruefen, dass nur eigene bankkonto_id / eigene Buchungen in der API-Liste vorkommen.
+
+Warum wichtig:
+Tenant-Isolation ist Kernanforderung. Der Test behauptet Schutz, beweist ihn aber nicht.
+
+2. HIGH - Dedupe-Fingerprint kann echte doppelte Bankbuchungen verlieren
+Dateien:
+- packages/core/bank_import/fingerprint.py:20-49
+- apps/server/routers/bankbuchungen.py:42-58
+- migrations/versions/006_bankbuchungen.py:86
+
+Problem:
+Der Fingerprint besteht aus Tenant, Konto, Datum, Betrag, Waehrung, Verwendungszweck, Gegenpartei, IBAN, Wertstellung und externe_buchungs_id.
+Wenn externe_buchungs_id fehlt, kollidieren zwei fachlich echte, aber identisch aussehende Buchungen am selben Tag.
+
+Beispiel:
+Zwei gleiche Kartenzahlungen oder zwei gleiche Sammelbuchungen mit gleichem Betrag, gleichem Text und gleicher Gegenpartei werden als ein Duplikat behandelt.
+Durch UNIQUE(dedup_fingerprint) + ON CONFLICT DO NOTHING geht dann eine echte Buchung verloren.
+
+Notwendige Korrektur:
+- Importdatensatz braucht ein stabiles Quell-Signal, z.B. source_row_number / source_position / source_transaction_key.
+- Dieses Signal muss in den Fingerprint einfliessen, mindestens wenn keine externe_buchungs_id vorhanden ist.
+- Integrationstest ergaenzen: Zwei identische Buchungen in derselben Datei muessen beide gespeichert werden; Re-Import derselben Datei darf trotzdem idempotent bleiben.
+
+Warum wichtig:
+BANK-01/BANK-03 verlangen vollstaendigen Import und saubere Deduplizierung. Aktuell kann Dedupe Datenverlust erzeugen.
+
+3. MEDIUM - DB erzwingt Tenant-Konsistenz zwischen Bankkonto, Import und Bankbuchung nicht
+Dateien:
+- migrations/versions/006_bankbuchungen.py:55-56
+- migrations/versions/006_bankbuchungen.py:82-84
+- apps/server/models/bankbuchung.py:44-69
+
+Problem:
+Die Tabellen haben zwar jeweils unternehmen_id und einfache Foreign Keys auf IDs, aber keine zusammengesetzten Tenant-FKs.
+Dadurch kann die DB theoretisch inkonsistente Daten enthalten, z.B.:
+- kontoauszugsimporte.unternehmen_id = Tenant A, bankkonto_id zeigt auf Konto von Tenant B
+- bankbuchungen.unternehmen_id = Tenant A, import_id zeigt auf Import von Tenant B
+
+Der normale Repository-Pfad setzt aktuell korrekt, aber die Datenbank selbst verhindert falsche Kombinationen nicht.
+
+Notwendige Korrektur:
+- Composite-Constraints/FKs planen:
+  - bankkonten: UNIQUE(id, unternehmen_id)
+  - kontoauszugsimporte: FK(bankkonto_id, unternehmen_id) -> bankkonten(id, unternehmen_id)
+  - kontoauszugsimporte: UNIQUE(id, unternehmen_id)
+  - bankbuchungen: FK(bankkonto_id, unternehmen_id) -> bankkonten(id, unternehmen_id)
+  - bankbuchungen: FK(import_id, unternehmen_id) -> kontoauszugsimporte(id, unternehmen_id)
+- Integrationstest oder DB-Test ergaenzen, der Cross-Tenant-Verknuepfung ablehnt.
+
+Warum wichtig:
+RLS schuetzt Sichtbarkeit, aber nicht automatisch referenzielle Tenant-Konsistenz. Fuer Buchhaltungsdaten sollte die DB falsche Tenant-Verknuepfungen hart verhindern.
+
+4. MEDIUM - iban_masked wird nicht als maskiert validiert
+Dateien:
+- apps/server/routers/bankbuchungen.py:22-27
+- apps/server/routers/bankbuchungen.py:30-36
+- apps/server/routers/bankbuchungen.py:171-186
+- apps/server/models/bankbuchung.py:19-26
+
+Problem:
+Das Feld heisst iban_masked, aber die API akzeptiert beliebigen Text und gibt ihn wieder zurueck.
+Ein Client kann versehentlich eine vollstaendige IBAN speichern, obwohl das Feld fachlich "masked" heisst.
+
+Notwendige Korrektur:
+- Entweder serverseitig maskieren.
+- Oder validieren, dass keine vollstaendige IBAN gespeichert wird.
+- Oder Feld fachlich klar umbenennen, falls volle IBAN wirklich erlaubt sein soll.
+- Test ergaenzen: volle IBAN wird nicht unmaskiert gespeichert/zurueckgegeben.
+
+Warum wichtig:
+Datensparsamkeit und Namensvertrag sind aktuell nicht deckungsgleich.
+
+5. LOW - Repository-Klassenname ist vermutlich Tippfehler
+Dateien:
+- apps/server/repositories/bankbuchung.py:14
+- apps/server/routers/bankbuchungen.py:10,16
+
+Problem:
+Die Klasse heisst BankkontoBRepository statt BankkontoRepository.
+
+Notwendige Korrektur:
+- Umbenennen, wenn keine Kompatibilitaetsgruende dagegen sprechen.
+
+Warum wichtig:
+Kein Laufzeitfehler, aber unnoetige Verwirrung in Phase 5.
+
+6. LOW/MEDIUM - Waehrung wird nur normalisiert, nicht validiert
+Datei:
+- apps/server/routers/bankbuchungen.py:72-75
+
+Problem:
+waehrung wird nur upper/strip normalisiert. Leere Strings oder beliebige Werte koennen in DB/Fingerprint landen.
+
+Notwendige Korrektur:
+- Mindestens nicht leer und ISO-4217-artig validieren, vermutlich exakt 3 Grossbuchstaben.
+- Test fuer ungueltige Waehrung ergaenzen.
+
+Warum wichtig:
+Verhindert inkonsistente Importdaten und instabile Fingerprints.
+
+Nicht als Fehler behandeln:
+- Kein offensichtliches Commit-Problem bei POST/Import: apps/server/database.py nutzt session.begin(), erfolgreiche Requests werden automatisch committed.
+- Direkte Repository-Filter auf unternehmen_id sind im normalen API-Pfad vorhanden.
